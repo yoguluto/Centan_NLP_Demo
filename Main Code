@@ -1,0 +1,258 @@
+import os
+import gensim
+import pandas as pd
+import numpy as np
+from gensim.test.utils import common_texts
+from gensim.models.doc2vec import Doc2Vec, TaggedDocument
+from gensim.models import TfidfModel
+from gensim.corpora import Dictionary
+from scipy import sparse
+import sklearn.preprocessing as pp
+import time
+import ipdb
+import random
+from progressbar import ProgressBar
+import nltk #;nltk.download('stopwords')
+from nltk.corpus import stopwords
+import nltk.stem as ns
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score
+#nltk.download('wordnet')
+def cosine_similarities(mat1,mat2):
+    col_normed_mat1 = pp.normalize(mat1.tocsc(), axis=1)
+    col_normed_mat2 = pp.normalize(mat2.tocsc(), axis=1)
+    return col_normed_mat1 * col_normed_mat2.T
+%matplotlib inline
+
+def PreProcess(RawText,threshold=0):
+    Text = []
+    WordCount = []
+    Delpart = []
+    lemmatizer = ns.WordNetLemmatizer()
+    stop_words = stopwords.words('english')
+    stop_words.extend(['false', 'quot', 'editor', 'editors', 'summary',"sonos","lsdexception","unhidewhenused"])
+    i = 0
+    p = ProgressBar(len(RawText)).start()
+    for t in RawText:
+        try:
+            i+=1
+            p.update(i)
+            CleanText = gensim.utils.simple_preprocess(t.lower())
+            CleanText = [lemmatizer.lemmatize(w,'v') for w in CleanText ]
+            CleanText = [lemmatizer.lemmatize(w,'n') for w in CleanText ]
+            CleanText =[word for word in CleanText if word not in stop_words]
+            if(len(CleanText)> threshold): 
+                Text.append(CleanText)
+                WordCount+= [len(CleanText)]
+            else:
+                Delpart +=[(i-1)] 
+        except Exception as errI:
+            #print("Error When Process Text No.",(i-1),"  ",errI)
+            Delpart += [(i-1)]
+            continue
+    p.finish()
+    documents = [TaggedDocument(doc, [i]) for i,doc in enumerate(Text)]
+    return(documents,Delpart,WordCount)
+
+def Doc2Vector(TrainIndex,Documents,VSize=100):
+    TrainDoc = [Documents[i] for i in TrainIndex] 
+    print("Model Training Start")
+    model = Doc2Vec(TrainDoc, vector_size=VSize, window=2, min_count=2, workers=4)
+    print("Model Training Finished")
+    D2VMatrix= []
+    j=0
+    print("Text Embedding Start")
+    p = ProgressBar(len(Documents)).start()
+    for d in Documents: 
+        RV = model.infer_vector(d[0])
+        D2VMatrix.append(RV)
+        p.update(j)
+        j+= 1
+    p.finish()
+    return(D2VMatrix)
+
+def CosineDistance(VM1,VM2,file_name,ID,SmallMemo = 1):
+    if(type(VM1)!= pd.core.frame.DataFrame): VM1 = pd.DataFrame(VM1)
+    if(type(VM2)!= pd.core.frame.DataFrame): VM2 = pd.DataFrame(VM2)
+    N = len(VM1)
+    MeanDistance =[]
+    PB = ProgressBar(N).start()
+    myfile = open(file_name,"w")
+    try:
+        for i in range(N):
+            C = ""
+            #ipdb.set_trace()
+            M1 = sparse.csr_matrix(VM1.ix[VM1.index[i]])
+            M2 = sparse.csr_matrix(VM2)
+            Cosine = cosine_similarities(M1,M2)
+            Dis = 1-Cosine.toarray()
+            if(SmallMemo!=1): MeanDistance.append(list(ID.ix[ID.index[i]])+[Dis.mean()])
+            del M1,M2,Cosine,Dis
+            PB.update(i)
+    except Exception as errI:
+        print(errI)
+    PB.finish()
+    myfile.close()
+    if(len(MeanDistance) ==0): MeanDistance = "Results have been saved at: "+ os.getcwd() +"\\"+ file_name
+    return(MeanDistance)
+
+def format_topics_sentences(model, corpus):
+    # Init output
+    sent_topics_df = pd.DataFrame()
+
+    # Get main topic in each document
+    for i, row in enumerate(model[corpus]):
+        row = sorted(row, key=lambda x: (x[1]), reverse=True)
+        # Get the Dominant topic, Perc Contribution and Keywords for each document
+        for j, (topic_num, prop_topic) in enumerate(row):
+            if j == 0:  # => dominant topic
+                wp = model.show_topic(topic_num)
+                topic_keywords = "; ".join([word for word, prop in wp])
+                sent_topics_df = sent_topics_df.append(pd.Series([int(topic_num), round(prop_topic,4), topic_keywords]), ignore_index=True)
+            else:
+                break
+    sent_topics_df.columns = ['Dominant_Topic', 'Perc_Contribution', 'Topic_Keywords']
+    return(sent_topics_df)
+    
+    #Data Input
+TrainText = []
+TestText = []
+Sp = pd.read_csv("RawData\\Customer\\speaker.csv",encoding="gbk")
+Ca = pd.read_csv("RawData\\Customer\\camera.csv",encoding="gbk")
+Lap = pd.read_csv("RawData\\Customer\\laptop.csv",encoding="gbk")
+TrainData = []
+TrainSS = 2000
+TrainIndex = random.sample(list(Sp.index),int(TrainSS))
+TrainData += [Sp.ix[TrainIndex]]
+Sp = Sp.drop(TrainIndex)
+TrainIndex = random.sample(list(Lap.index),int(TrainSS*0.5))
+TrainData += [Lap.ix[TrainIndex]]
+Lap = Lap.drop(TrainIndex)
+TrainIndex = random.sample(list(Ca.index),int(TrainSS*0.5))
+TrainData += [Ca.ix[TrainIndex]]
+Ca = Ca.drop(TrainIndex)
+TrainData = pd.concat(TrainData)
+TrainData = TrainData.reset_index(np.arange(0,len(TrainData)),drop=True)
+TrainData["TestFlag"] = 0
+TestData = []
+TestSS = 20000
+TestIndex = random.sample(list(Sp.index),int(TestSS*0.1))
+TestData += [Sp.ix[TestIndex]]
+TestIndex = random.sample(list(Ca.index),int(TestSS*0.45))
+TestData += [Ca.ix[TestIndex]]
+TestIndex = random.sample(list(Lap.index),int(TestSS*0.45))
+TestData += [Lap.ix[TestIndex]]
+#TestIndex = random.sample(list(Lap.index),int(TestSS*0.45))
+#TestData += [Lap.ix[TestIndex]]
+TestData = pd.concat(TestData)
+TestData = TestData.reset_index(np.arange(0,len(TestData)),drop=True)
+TestData["TestFlag"] = 1
+
+#Preprocess - delete stopwords and get infinitive
+Data = []
+Data += [TrainData]
+Data += [TestData]
+Data = pd.concat(Data)
+Data = Data.reset_index(np.arange(0,len(Data)),drop=True)
+Documents,Delpart,WordCount = PreProcess(list(Data["1"]))
+Data = Data.drop(Delpart)
+
+#Doc Embedding
+VSize=100
+Data = Data.reset_index(np.arange(0,len(Data)),drop=True)
+TrainIndex = Data.index
+D2VM = Doc2Vector(TrainIndex,Documents,VSize=VSize)
+Result = []
+for i in range(len(D2VM)):
+    Result.append(list(Data.ix[i,["0","2","3","4","5","TestFlag"]])+[WordCount[i]]+list(D2VM[i]))
+ColName = ["ComID","Help","Star","GoodID","Cat","TestFlag","Wordcount"] + ["D2V" + str(n) for n in range(1,VSize+1)]
+Result = pd.DataFrame(Result,columns = ColName)
+
+#Compute Distance, summary result and save
+Flag = np.logical_and(Result["TestFlag"]==0,Result["Cat"]=="speaker")
+VM1 = Result.ix[Flag,7:]
+ID = Result.ix[Flag]
+R1 = CosineDistance(VM1,VM1,"Centan\\test.txt",ID,SmallMemo = 0)
+Flag = np.logical_and(Result["TestFlag"]==0,Result["Cat"]!="speaker")
+VM2 = Result.ix[Flag,7:]
+ID = Result.ix[Flag]
+R2 = CosineDistance(VM2,VM1,"Centan\\test.txt",ID,SmallMemo = 0)
+VM2 = Result.ix[Result["TestFlag"]==1,7:]
+ID = Result.ix[Result["TestFlag"]==1]
+R3 = CosineDistance(VM2,VM1,"Centan\\test.txt",ID,SmallMemo = 0)
+ColName = ["ComID","Help","Star","GoodID","Cat","TestFlag","Wordcount"] + ["D2V" + str(n) for n in range(1,VSize+1)]
+DisResult = pd.concat([pd.DataFrame(R1,columns=ColName +["Dis"]),pd.DataFrame(R2,columns=ColName +["Dis"]),pd.DataFrame(R3,columns=ColName +["Dis"])] )
+
+#logistic regression predict which is the aim comment
+threshold=0.6
+Data = DisResult.drop(["ComID","Help","Star","GoodID","Cat","TestFlag"],axis=1)
+X_Train = Data.ix[DisResult["TestFlag"]==0]
+y_Train = (DisResult.ix[DisResult["TestFlag"]==0,"Cat"]=="speaker")
+clf = LogisticRegression()
+clf.fit(X_Train,y_Train)
+clf.score(X_Train,y_Train)
+X_Test = Data.ix[DisResult["TestFlag"]==1]
+y_Test = (DisResult.ix[DisResult["TestFlag"]==1,"Cat"]=="speaker")
+#predict_y = clf.predict(X_Test)
+predict_y = clf.predict_proba(X_Test)
+predict_y = pd.DataFrame(predict_y,columns=["0","1"])
+predict_y = predict_y["1"]>threshold
+print(accuracy_score(y_Test, predict_y))
+pd.crosstab(y_Test, predict_y)
+
+use lsa to extract topics
+TrainIndex = np.where(DisResult["TestFlag"]==1)[0][predict_y]
+TrainDoc = [Documents[i][0] for i in TrainIndex]
+id2word = Dictionary(TrainDoc)
+corpus =[id2word.doc2bow(Doc) for Doc in TrainDoc]
+#gensim.matutils.corpus2csc(doc_lsa).toarray()
+lsa_model = gensim.models.LsiModel(corpus=corpus,id2word=id2word
+                                                    ,num_topics=40)
+# Compute Coherence Score
+coherence_lsa_model  = gensim.models.coherencemodel.CoherenceModel(model=lsa_model , texts=TrainDoc, dictionary=id2word, coherence='c_v')
+coherence_lsa = coherence_lsa_model.get_coherence()
+print('Coherence Score: ', coherence_lsa)
+#doc_lda = lda_model[corpus]
+df_topic_sents_keywords = format_topics_sentences(model=lsa_model, corpus=corpus)
+# Format
+df_dominant_topic = df_topic_sents_keywords.reset_index()
+df_dominant_topic.columns = ['Document_No', 'Dominant_Topic', 'Topic_Contrib', 'Keywords']
+#df_dominant_topic.to_csv("Topic_Speaker.csv",index=False)
+#pd.DataFrame(lsa_model.show_topic(int(df_dominant_topic["Dominant_Topic"].value_counts().index[0]),20)).to_csv("Summary_Topic.csv",index=False)
+
+#predict which is negative
+DisResult = DisResult.reset_index(drop=True)
+SpData = DisResult.ix[TrainIndex]
+Data = DisResult.drop(["ComID","Help","Star","GoodID","Cat","TestFlag"],axis=1)
+X_Train = Data.ix[DisResult["TestFlag"]==0]
+y_Train = (DisResult.ix[DisResult["TestFlag"]==0,"Star"]<4)
+clf = LogisticRegression()
+clf.fit(X_Train,y_Train)
+clf.score(X_Train,y_Train)
+X_Test = SpData.drop(["ComID","Help","Star","GoodID","Cat","TestFlag"],axis=1)
+y_Test = (SpData["Star"]<3)
+predict_y = clf.predict(X_Test)
+#predict_y = clf.predict_proba(X_Test)
+#predict_y = pd.DataFrame(predict_y,columns=["0","1"])
+#predict_y = predict_y["1"]>threshold
+print(accuracy_score(y_Test, predict_y))
+pd.crosstab(y_Test, predict_y)
+
+#use lsa to extract topics
+NegDoc = [TrainDoc[i] for i in list(np.arange(len(TrainDoc))[predict_y])]
+id2word = Dictionary(NegDoc)
+corpus =[id2word.doc2bow(Doc) for Doc in NegDoc]
+#gensim.matutils.corpus2csc(doc_lsa).toarray()
+lsa_model = gensim.models.LsiModel(corpus=corpus,id2word=id2word
+                                                    ,num_topics=40)
+# Compute Coherence Score
+coherence_lsa_model  = gensim.models.coherencemodel.CoherenceModel(model=lsa_model , texts=NegDoc, dictionary=id2word, coherence='c_v')
+coherence_lsa = coherence_lsa_model.get_coherence()
+print('Coherence Score: ', coherence_lsa)
+#doc_lda = lda_model[corpus]
+df_topic_sents_keywords = format_topics_sentences(model=lsa_model, corpus=corpus)
+# Format
+df_dominant_topic = df_topic_sents_keywords.reset_index()
+df_dominant_topic.columns = ['Document_No', 'Dominant_Topic', 'Topic_Contrib', 'Keywords']
+#df_dominant_topic.to_csv("Topic_Speaker_Neg.csv",index=False)
+#pd.DataFrame(lsa_model.show_topic(int(df_dominant_topic["Dominant_Topic"].value_counts().index[0]),20)).to_csv("Summary_Topic_Neg.csv",index=False)
